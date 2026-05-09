@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <title>像素電流急急棒</title>
+    <style>
+        body {
+            background-color: #222;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            color: white;
+            font-family: 'Press Start 2P', 'Courier New', Courier, monospace;
+            overflow: hidden;
+        }
+        canvas {
+            image-rendering: pixelated; /* 確保像素風格清晰 */
+            border: 6px solid #444;
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+            cursor: none; /* 隱藏滑鼠，由遊戲角色代替 */
+        }
+        #ui {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            pointer-events: none;
+            text-align: center;
+            text-shadow: 3px 3px #000;
+            z-index: 10;
+            transition: opacity 0.5s ease-out;
+        }
+    </style>
+    <!-- 引入像素字體 -->
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+</head>
+<body>
+
+<div id="ui">
+    <h2 id="status">FOREST RUN: CLICK WHITE SQUARE TO START</h2>
+</div>
+<canvas id="gameCanvas" width="1200" height="900"></canvas>
+
+<script>
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d', { willReadFrequently: true, alpha: false });
+const statusText = document.getElementById('status');
+
+// 關閉抗鋸齒以確保顏色偵測精準
+ctx.imageSmoothingEnabled = false;
+
+// 遊戲狀態
+let gameState = 'IDLE'; // IDLE, PLAYING, WON, LOST
+let mousePos = { x: 50, y: 50 };
+const pathColor = '#333333'; 
+const wallColor = '#000000'; // 牆壁顏色
+const activeColor = '#ffffff'; // 起點與終點顏色 (白色)
+const borderColor = '#555555'; // 路徑邊界顏色
+
+// 背景裝飾點
+const stars = Array.from({ length: 100 }, () => ({
+    x: Math.random() * 1200,
+    y: Math.random() * 900,
+    size: Math.random() * 3 + 1
+}));
+
+// 建立路徑遮罩以防止樹木重疊
+const maskCanvas = document.createElement('canvas');
+maskCanvas.width = 1200; maskCanvas.height = 900;
+const mctx = maskCanvas.getContext('2d');
+mctx.lineWidth = 80; // 稍微寬一點作為緩衝
+drawPathSegments(mctx);
+mctx.stroke();
+
+const trees = [];
+for(let i = 0; i < 80; i++) {
+    let tx, ty, isValid = false;
+    while(!isValid) {
+        tx = Math.random() * 1200;
+        ty = Math.random() * 900;
+        // 檢查遮罩，如果該點是透明的則可以種樹
+        const maskData = mctx.getImageData(Math.floor(tx), Math.floor(ty), 1, 1).data;
+        if(maskData[3] === 0) isValid = true;
+    }
+    trees.push({ x: tx, y: ty, scale: 0.8 + Math.random() * 0.5 });
+}
+
+// 定義具有特定行為的像素動物 (每種僅一隻, 速度大幅放慢)
+const animals = [
+    // 老虎: 速度 0.001 (最慢), 範圍 120 (最小) - 垂直切入第一段橫向道路
+    { type: 'tiger', x: 250, y: 55, originX: 250, originY: 55, range: 120, speed: 0.001, dir: 'V' },
+    // 兔子: 速度 0.003, 範圍 220 - 水平切入左側垂直走道
+    { type: 'rabbit', x: 150, y: 450, originX: 150, originY: 450, range: 220, speed: 0.003, dir: 'H' },
+    // 鳥: 速度 0.002, 範圍 550 (最大) - 橫穿整個畫面
+    { type: 'bird', x: 600, y: 400, originX: 600, originY: 400, range: 550, speed: 0.002, dir: 'H' },
+    // 蟑螂: 速度 0.005 (最快), 範圍 350 - 垂直切入最後一段橫向與轉向路徑
+    { type: 'cockroach', x: 1125, y: 400, originX: 1125, originY: 400, range: 350, speed: 0.005, dir: 'V' }
+];
+
+// 狀態文字顯示控制
+let statusTimeout;
+function updateStatus(text, color = "white") {
+    statusText.innerText = text;
+    statusText.style.color = color;
+    statusText.style.opacity = 1;
+    
+    clearTimeout(statusTimeout);
+    statusTimeout = setTimeout(() => {
+        statusText.style.opacity = 0;
+    }, 3000);
+}
+
+// 定義路徑 (簡單的崎嶇線條)
+function drawMap() {
+    // 背景/牆壁
+    ctx.fillStyle = wallColor;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // 繪製背景裝飾 (像素星點)
+    ctx.fillStyle = "#333";
+    stars.forEach(star => {
+        ctx.fillRect(star.x, star.y, star.size, star.size);
+    });
+
+    // 繪製像素樹木
+    trees.forEach(tree => drawPixelTree(tree.x, tree.y, tree.scale));
+
+    // 繪製崎嶇路徑 (外框邊緣感)
+    ctx.strokeStyle = borderColor;
+    ctx.lineWidth = 50;
+    ctx.lineCap = 'square';
+    ctx.lineJoin = 'miter';
+    drawPathSegments();
+    ctx.stroke();
+
+    // 內部路徑
+    ctx.strokeStyle = pathColor;
+    ctx.lineWidth = 44;
+    drawPathSegments();
+    ctx.stroke();
+
+    // 繪製起點 (白色像素風格)
+    drawPixelBox(30, 30, 50, activeColor);
+
+    // 繪製終點 (白色像素風格)
+    drawPixelBox(1100, 800, 50, activeColor);
+
+    // 繪製像素動物 (置於路徑之上，確保可見)
+    animals.forEach(animal => drawAnimal(animal));
+}
+
+function drawPathSegments(targetCtx = ctx) {
+    targetCtx.beginPath();
+    targetCtx.moveTo(55, 55); // 起點
+    targetCtx.lineTo(400, 55);
+    targetCtx.lineTo(400, 300);
+    targetCtx.lineTo(150, 300);
+    targetCtx.lineTo(150, 750);
+    targetCtx.lineTo(500, 750);
+    targetCtx.lineTo(500, 500);
+    targetCtx.lineTo(850, 500);
+    targetCtx.lineTo(850, 150);
+    targetCtx.lineTo(1125, 150);
+    targetCtx.lineTo(1125, 825); // 終點
+}
+
+function drawPixelBox(x, y, size, color) {
+    ctx.fillStyle = color;
+    ctx.fillRect(x, y, size, size);
+    // 加上簡單的像素內陰影增加細節
+    ctx.fillStyle = "rgba(0,0,0,0.2)";
+    ctx.fillRect(x + size - 5, y, 5, size);
+    ctx.fillRect(x, y + size - 5, size, 5);
+}
+
+function drawPixelTree(x, y, scale) {
+    const s = 10 * scale;
+    // 樹幹
+    ctx.fillStyle = "#5D4037";
+    ctx.fillRect(x - s/4, y, s/2, s);
+    // 樹葉
+    ctx.fillStyle = "#2E7D32";
+    ctx.fillRect(x - s, y - s, s * 2, s);
+    ctx.fillRect(x - s*0.7, y - s * 1.7, s * 1.4, s);
+    ctx.fillRect(x - s*0.4, y - s * 2.2, s * 0.8, s);
+}
+
+function drawAnimal(animal) {
+    const { type, x, y } = animal;
+    const t = Date.now();
+
+    if (type === 'tiger') {
+        // 老虎: 橘黑相間
+        ctx.fillStyle = "#F57C00";
+        ctx.fillRect(x - 30, y - 18, 60, 36); // 加大身體
+        ctx.fillStyle = "#000";
+        ctx.fillRect(x - 15, y - 18, 6, 36);  // 條紋
+        ctx.fillRect(x + 8, y - 18, 6, 36);
+        // 走路腳步動畫
+        const legOff = Math.sin(t * 0.002) * 8;
+        ctx.fillStyle = "#F57C00";
+        ctx.fillRect(x - 15, y + 12, 6, 8 + legOff);
+        ctx.fillRect(x + 8, y + 12, 6, 8 - legOff);
+    } 
+    else if (type === 'rabbit') {
+        // 兔子: 白色 jump
+        const jumpY = Math.abs(Math.sin(t * 0.005)) * -25;
+        ctx.fillStyle = "#FFFFFF";
+        ctx.fillRect(x - 15, y - 15 + jumpY, 30, 30); // 加大身體
+        ctx.fillStyle = "#F06292"; // 耳朵粉色
+        ctx.fillRect(x - 12, y - 32 + jumpY, 9, 18);
+        ctx.fillRect(x + 3, y - 32 + jumpY, 9, 18);
+    }
+    else if (type === 'bird') {
+        // 鳥: 拍動翅膀
+        const wingY = Math.sin(t * 0.005) * 25;
+        ctx.fillStyle = "#2196F3";
+        ctx.fillRect(x - 20, y - 12, 40, 24); // 加大身體
+        ctx.fillStyle = "#64B5F6";
+        ctx.fillRect(x - 40, y - 6 + wingY, 20, 8); // 左大翅
+        ctx.fillRect(x + 20, y - 6 + wingY, 20, 8); // 右大翅
+        ctx.fillStyle = "#FFEB3B";
+        ctx.fillRect(x + 15, y, 10, 6); // 嘴巴
+    }
+    else if (type === 'cockroach') {
+        // 蟑螂: 加大尺寸且明顯可見
+        ctx.fillStyle = "#5D4037";
+        ctx.fillRect(x - 25, y - 12, 50, 24); // 巨大的身體
+        // 觸角
+        ctx.strokeStyle = "#5D4037";
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(x + 25, y); ctx.lineTo(x + 45, y - 15);
+        ctx.moveTo(x + 25, y); ctx.lineTo(x + 45, y + 15);
+        ctx.stroke();
+        // 快速抖動的腿
+        const legScurry = Math.sin(t * 0.02) * 10;
+        ctx.fillRect(x - 15, y + 12, 4, 10 + legScurry);
+        ctx.fillRect(x, y + 12, 4, 10 - legScurry);
+        ctx.fillRect(x + 15, y + 12, 4, 10 + legScurry);
+    }
+}
+
+// 獲取滑鼠位置下的顏色 (用於碰撞偵測)
+function getPixelData(x, y) {
+    return ctx.getImageData(Math.floor(x), Math.floor(y), 1, 1).data;
+}
+
+// 繪製黃色小精靈角色
+function drawPlayer(x, y) {
+    const time = Date.now();
+    const isMouthOpen = Math.floor(time / 200) % 2 === 0;
+
+    // 身體 (黃色)
+    ctx.fillStyle = "#FFD700";
+    
+    if (isMouthOpen && gameState === 'PLAYING') {
+        // 張嘴狀態：繪製缺角的方塊
+        ctx.fillRect(x - 12, y - 12, 24, 8); // 上半部
+        ctx.fillRect(x - 12, y + 4, 24, 8);  // 下半部
+        ctx.fillRect(x - 12, y - 4, 12, 8);  // 後腦勺
+    } else {
+        // 閉嘴狀態：完整方塊
+        ctx.fillRect(x - 12, y - 12, 24, 24);
+    }
+
+    // 眼睛
+    ctx.fillStyle = "#000";
+    ctx.fillRect(x + 2, y - 8, 6, 6);
+    
+    // 點綴像素 (高光)
+    ctx.fillStyle = "#FFF";
+    ctx.fillRect(x - 6, y - 6, 4, 4);
+}
+
+function gameLoop() {
+    // 1. 先畫地圖
+    drawMap();
+
+    // 2. 更新動物位置 (規律往返移動)
+    if (gameState === 'PLAYING' || gameState === 'IDLE') {
+        const time = Date.now();
+        animals.forEach(a => {
+            const mainOffset = Math.sin(time * a.speed) * a.range;
+            if (a.dir === 'H') a.x = a.originX + mainOffset;
+            else a.y = a.originY + mainOffset;
+
+            // 蟑螂特殊移動邏輯：在垂直移動的基礎上增加水平擺動，使其在道路與森林間穿梭
+            if (a.type === 'cockroach') {
+                a.x = a.originX + Math.sin(time * 0.003) * 80;
+            }
+        });
+    }
+
+    // 3. 如果在遊戲中，檢查碰撞並畫角色
+    if (gameState === 'PLAYING') {
+        const p = getPixelData(mousePos.x, mousePos.y);
+        
+        // 碰撞判定優化：路徑、邊界、起點皆為 R=G=B 的灰階色調，且亮度(R)大於 30
+        // 此邏輯可同時相容陰影產生的顏色變化，並排除綠色樹木與黑色牆壁
+        const isGrayscale = (p[0] === p[1] && p[1] === p[2]);
+        const isSafePath = isGrayscale && p[0] > 30;
+        
+        // 如果不是安全路徑，或者是動物的顏色(非灰階)，則失敗
+        if (!isSafePath) {
+            gameState = 'LOST';
+            updateStatus("💥 OUT OF BOUNDS! CLICK TO RETRY", "#FF4444");
+        } else if (p[0] === 255 && p[1] === 255 && mousePos.x > 1000 && mousePos.y > 700) {
+            gameState = 'WON';
+            updateStatus("🏆 FOREST CLEARED! YOU WON!", "#44FF44");
+        }
+        
+        drawPlayer(mousePos.x, mousePos.y);
+    } else if (gameState === 'IDLE') {
+        // 提示起點位置
+        drawPlayer(mousePos.x, mousePos.y);
+    }
+
+    requestAnimationFrame(gameLoop);
+}
+
+canvas.addEventListener('mousedown', (e) => {
+    if (gameState !== 'PLAYING') {
+        const rect = canvas.getBoundingClientRect();
+        // 修正座標縮放：將 CSS 座標轉換為畫布內部座標
+        const scaleX = canvas.width / rect.width;
+        const scaleY = canvas.height / rect.height;
+        const x = (e.clientX - rect.left) * scaleX;
+        const y = (e.clientY - rect.top) * scaleY;
+
+        // 使用座標範圍判斷起點 (30,30 寬50的高)
+        if (x >= 30 && x <= 80 && y >= 30 && y <= 80) {
+            gameState = 'PLAYING';
+            updateStatus("RUN! DON'T TOUCH THE WALLS");
+        }
+    }
+});
+
+canvas.addEventListener('mousemove', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    // 修正座標縮放
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    mousePos.x = (e.clientX - rect.left) * scaleX;
+    mousePos.y = (e.clientY - rect.top) * scaleY;
+});
+
+canvas.addEventListener('click', () => {
+    if (gameState === 'LOST' || gameState === 'WON') {
+        gameState = 'IDLE';
+        updateStatus("CLICK WHITE SQUARE TO START");
+    }
+});
+
+// 初始化
+gameLoop();
+// 初始提示
+updateStatus("FOREST RUN: CLICK WHITE SQUARE TO START");
+</script>
+
+</body>
+</html>
